@@ -1,4 +1,9 @@
-optimized_model,benchmark_model,delta_expected_return,delta_variance,delta_volatility,delta_sharpe_ratio,delta_objective_score,delta_turnover,delta_transaction_cost,optimized_beats_benchmark_on_objective,optimized_beats_benchmark_on_sharpe,qubo_model,classical_model,qubo_beats_classical_on_objective,qubo_beats_classical_on_sharpe
-optimized_baseline,equal_weight_benchmark,0.1301787024424997,0.043191789115015505,0.08312384137635256,0.12663925614214544,0.08458280788499195,1.2000000000000002,0.024000000000000004,True,True,,,,
-qubo_optimizer,equal_weight_benchmark,0.13725599387928375,0.03670944717079805,0.07216982310340456,0.1975387765539811,0.09490127029388473,1.2,0.024,True,True,,,,
-,,0.007077291436784039,-0.006482341944217457,-0.010954018272948007,0.07089952041183567,0.010318462408892781,-2.220446049250313e-16,-3.469446951953614e-18,,,qubo_optimizer,optimized_baseline,True,True
+metric,value
+Static QUBO+ vs Classical objective delta,-0.020281955923857176
+Static QUBO+ vs Classical Sharpe delta,0.06237211655084196
+Regime-Aware QUBO+ vs Classical objective delta,-0.10448321458239146
+Regime-Aware QUBO+ vs Classical Sharpe delta,-0.034393290014974154
+Regime-Aware QUBO+ vs Static QUBO+ objective delta,-0.08420125865853428
+Regime-Aware QUBO+ vs Static QUBO+ Sharpe delta,-0.09676540656581611
+Static QUBO+ vs Benchmark Sharpe delta,0.1890117901442807
+Regime-Aware QUBO+ vs Benchmark Sharpe delta,0.0922463835784646
