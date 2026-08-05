@@ -1,9 +1,9 @@
 metric,value
-Static QUBO+ vs Classical objective delta,-0.020281955923857176
-Static QUBO+ vs Classical Sharpe delta,0.06237211655084196
-Regime-Aware QUBO+ vs Classical objective delta,-0.10448321458239146
-Regime-Aware QUBO+ vs Classical Sharpe delta,-0.034393290014974154
-Regime-Aware QUBO+ vs Static QUBO+ objective delta,-0.08420125865853428
-Regime-Aware QUBO+ vs Static QUBO+ Sharpe delta,-0.09676540656581611
-Static QUBO+ vs Benchmark Sharpe delta,0.1890117901442807
-Regime-Aware QUBO+ vs Benchmark Sharpe delta,0.0922463835784646
+Static QUBO+ vs Classical objective delta,-0.02028194569658226
+Static QUBO+ vs Classical Sharpe delta,0.06237210715371444
+Regime-Aware QUBO+ vs Classical objective delta,-0.10448324062535497
+Regime-Aware QUBO+ vs Classical Sharpe delta,-0.03439333214918783
+Regime-Aware QUBO+ vs Static QUBO+ objective delta,-0.08420129492877271
+Regime-Aware QUBO+ vs Static QUBO+ Sharpe delta,-0.09676543930290227
+Static QUBO+ vs Benchmark Sharpe delta,0.1890118453601899
+Regime-Aware QUBO+ vs Benchmark Sharpe delta,0.09224640605728762

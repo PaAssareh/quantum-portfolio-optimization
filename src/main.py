@@ -1,9 +1,11 @@
-import json
-import os
+import sys
+from pathlib import Path
+
+sys.path.append("src")
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 from config import (
     TICKERS,
@@ -23,333 +25,397 @@ from config import (
     PREVIOUS_WEIGHTS,
 )
 from data_loader import download_adjusted_close, save_prices_to_csv
-from portfolio_math import (
-    compute_daily_returns,
-    annualized_mean_returns,
-    annualized_covariance,
-)
-from classical_baseline import brute_force_cardinality, portfolio_metrics, compute_turnover
+from portfolio_math import compute_daily_returns, annualized_mean_returns, annualized_covariance
+from classical_baseline import brute_force_cardinality, check_constraints
 from qubo_integration import run_qubo_portfolio
+from regime_detector import detect_regime, regime_parameters
+from regime_rebalance import partial_rebalance, selection_from_weights
 
 
-RISK_FREE_RATE = 0.0
+def ensure_previous_weights(tickers):
+    return np.array([PREVIOUS_WEIGHTS.get(t, 0.0) for t in tickers], dtype=float)
 
 
-def build_comparison_chart(comparison_df, output_path):
-    metric_names = [
-        ("expected_return", "Exp Return"),
-        ("volatility", "Volatility"),
-        ("sharpe_ratio", "Sharpe"),
-        ("objective_score", "Objective"),
-    ]
-
-    fig = go.Figure()
-
-    for _, row in comparison_df.iterrows():
-        fig.add_trace(
-            go.Bar(
-                name=row["model"],
-                x=[label for _, label in metric_names],
-                y=[row[col] for col, _ in metric_names],
-                text=[f"{row[col]:.3f}" for col, _ in metric_names],
-                textposition="outside",
-                cliponaxis=False,
-            )
-        )
-
-    fig.update_layout(
-        title={
-            "text": "Portfolio metrics vs benchmark (2020-2025)<br><span style='font-size: 18px; font-weight: normal;'>Source: model outputs | Optimized portfolio compared with equal-weight benchmark</span>"
-        },
-        barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="center", x=0.5),
+def equal_weight_benchmark(mean_returns, cov_matrix, previous_weights, tickers):
+    n = len(tickers)
+    weights = np.ones(n, dtype=float) / n
+    expected_return = float(np.dot(mean_returns, weights))
+    variance = float(weights @ cov_matrix @ weights)
+    volatility = float(np.sqrt(max(variance, 0.0)))
+    turnover = float(np.sum(np.abs(weights - previous_weights)))
+    transaction_cost = float(TRANSACTION_COST_PENALTY * turnover)
+    objective_score = expected_return - RISK_AVERSION * variance - transaction_cost
+    constraints = check_constraints(
+        np.ones(n, dtype=int),
+        weights,
+        budget=n,
+        tickers=tickers,
+        sector_map=SECTOR_MAP,
+        sector_max_weights={k: 1.0 for k in SECTOR_MAX_WEIGHTS},
     )
-    fig.update_xaxes(title_text="Metric")
-    fig.update_yaxes(title_text="Value")
-    fig.write_image(output_path)
+    return {
+        "name": "Equal-Weight Benchmark",
+        "selection": np.ones(n, dtype=int),
+        "weights": weights,
+        "objective_score": float(objective_score),
+        "turnover": float(turnover),
+        "transaction_cost": float(transaction_cost),
+        "expected_return": float(expected_return),
+        "variance": float(variance),
+        "volatility": float(volatility),
+        "sharpe_ratio": float(expected_return / max(volatility, 1e-12)),
+        **constraints,
+    }
 
-    with open(output_path + ".meta.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "caption": "Portfolio vs benchmark metrics",
-                "description": "Grouped bar chart comparing expected return, volatility, Sharpe ratio, and objective score for the optimized portfolio and the equal-weight benchmark.",
-            },
-            f,
-        )
+
+def normalize_result(
+    name,
+    selection,
+    weights,
+    objective_score,
+    turnover,
+    transaction_cost,
+    expected_return,
+    variance,
+    volatility,
+    sharpe_ratio,
+    constraints,
+):
+    return {
+        "name": name,
+        "selection": np.asarray(selection, dtype=int),
+        "weights": np.asarray(weights, dtype=float),
+        "objective_score": float(objective_score),
+        "turnover": float(turnover),
+        "transaction_cost": float(transaction_cost),
+        "expected_return": float(expected_return),
+        "variance": float(variance),
+        "volatility": float(volatility),
+        "sharpe_ratio": float(sharpe_ratio),
+        **constraints,
+    }
 
 
-def main():
-    os.makedirs(DATA_DIR, exist_ok=True)
+def print_report(title, result, tickers):
+    selected_assets = [tickers[i] for i, v in enumerate(result["selection"]) if int(v) == 1]
+    selected_weights = [round(float(w), 4) for w in result["weights"][result["weights"] > 0]]
 
-    prices = download_adjusted_close(TICKERS, START_DATE, END_DATE)
-    save_prices_to_csv(prices, PRICES_FILE)
+    print(f"\n=== {title} ===")
+    print(f"Selected assets: {selected_assets}")
+    print(f"Selected weights: {selected_weights}")
+    print(f"Objective score: {result['objective_score']}")
+    print(f"Expected return: {result['expected_return']}")
+    print(f"Variance: {result['variance']}")
+    print(f"Volatility: {result['volatility']}")
+    print(f"Sharpe ratio: {result['sharpe_ratio']}")
+    print(f"Turnover: {result['turnover']}")
+    print(f"Transaction cost: {result['transaction_cost']}")
+    print("Constraint checks:")
+    print(f"  budget: {result['constraint_budget_ok']}")
+    print(f"  long_only: {result['constraint_long_only_ok']}")
+    print(f"  fully_invested: {result['constraint_fully_invested_ok']}")
+    print(f"  sector: {result['constraint_sector_ok']}")
+    print(f"Sector exposures: {result['sector_exposures']}")
 
+
+def save_outputs(results_df, summary_df):
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    results_df.to_csv(COMPARISON_RESULTS_FILE, index=False)
+    summary_df.to_csv(SUMMARY_RESULTS_FILE, index=False)
+
+    plt.figure(figsize=(10, 5))
+    names = results_df["model"].tolist()
+    sharpe = results_df["sharpe_ratio"].tolist()
+    objective = results_df["objective_score"].tolist()
+
+    x = np.arange(len(names))
+    width = 0.35
+
+    plt.bar(x - width / 2, sharpe, width, label="Sharpe ratio")
+    plt.bar(x + width / 2, objective, width, label="Objective score")
+    plt.xticks(x, names, rotation=20)
+    plt.ylabel("Value")
+    plt.title("Portfolio Model Comparison")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(CHART_FILE, dpi=200)
+    plt.close()
+
+
+def run_static_and_regime_aware(prices, tickers):
     returns = compute_daily_returns(prices)
-    mean_returns = annualized_mean_returns(returns).values
-    cov_matrix = annualized_covariance(returns).values
+    mean_returns = annualized_mean_returns(returns).reindex(tickers).to_numpy(dtype=float)
+    cov_matrix = annualized_covariance(returns).reindex(index=tickers, columns=tickers).to_numpy(dtype=float)
+    previous_weights = ensure_previous_weights(tickers)
 
-    previous_weights_array = np.array(
-        [PREVIOUS_WEIGHTS[ticker] for ticker in prices.columns],
-        dtype=float,
-    )
-
-    # === Classical Optimized Baseline ===
-    optimized = brute_force_cardinality(
+    classical = brute_force_cardinality(
         mean_returns=mean_returns,
         cov_matrix=cov_matrix,
         budget=BUDGET,
         risk_aversion=RISK_AVERSION,
-        tickers=prices.columns.tolist(),
+        tickers=tickers,
         sector_map=SECTOR_MAP,
         sector_max_weights=SECTOR_MAX_WEIGHTS,
-        previous_weights=previous_weights_array,
+        previous_weights=previous_weights,
         transaction_cost_penalty=TRANSACTION_COST_PENALTY,
-        risk_free_rate=RISK_FREE_RATE,
     )
 
-    selection = optimized["selection"]
-    weights = optimized["weights"]
-
-    selected_assets = [
-        ticker for ticker, flag in zip(prices.columns, selection) if flag == 1
-    ]
-    selected_weights = [float(w) for w in weights if w > 0]
-
-    baseline_row = {
-        "model": "optimized_baseline",
-        "selected_assets": ", ".join(selected_assets),
-        "selected_weights": ", ".join([f"{w:.4f}" for w in selected_weights]),
-        "objective_score": optimized["objective_score"],
-        "expected_return": optimized["expected_return"],
-        "variance": optimized["variance"],
-        "volatility": optimized["volatility"],
-        "sharpe_ratio": optimized["sharpe_ratio"],
-        "turnover": optimized["turnover"],
-        "transaction_cost": optimized["transaction_cost"],
-        "budget": BUDGET,
-        "selected_count": optimized["selected_count"],
-        "constraint_budget_ok": optimized["constraint_budget_ok"],
-        "constraint_long_only_ok": optimized["constraint_long_only_ok"],
-        "constraint_fully_invested_ok": optimized["constraint_fully_invested_ok"],
-        "constraint_sector_ok": optimized["constraint_sector_ok"],
-        "sector_exposures": str(optimized["sector_exposures"]),
-    }
-
-    # === QUBO Optimizer ===
-    qubo = run_qubo_portfolio(
+    static_qubo = run_qubo_portfolio(
         mean_returns=mean_returns,
         cov_matrix=cov_matrix,
-        previous_weights=previous_weights_array,
+        previous_weights=previous_weights,
         budget=BUDGET,
-        tickers=prices.columns.tolist(),
+        tickers=tickers,
         sector_map=SECTOR_MAP,
         sector_max_weights=SECTOR_MAX_WEIGHTS,
         lambda_risk=RISK_AVERSION,
-        P_card=10.0,
-        P_turn=1.0,
+        P_card=15.0,
+        P_turn=2.0,
+        P_turn_quad=2.0,
+        P_sector=25.0,
         transaction_cost_penalty=TRANSACTION_COST_PENALTY,
-        risk_free_rate=RISK_FREE_RATE,
-        num_reads=100,
-        num_sweeps=1000,
+        num_reads=250,
+        num_sweeps=2500,
         seed=42,
     )
 
-    qubo_selection = qubo["selection"]
-    qubo_weights = qubo["weights"]
+    regimes, _ = detect_regime(prices)
+    latest_regime = str(regimes.iloc[-1]) if not regimes.empty else "bear"
+    rp = regime_parameters(latest_regime)
 
-    qubo_selected_assets = [
-        ticker for ticker, flag in zip(prices.columns, qubo_selection) if flag == 1
-    ]
-    qubo_selected_weights = [float(w) for w in qubo_weights if w > 0]
-
-    qubo_row = {
-        "model": "qubo_optimizer",
-        "selected_assets": ", ".join(qubo_selected_assets),
-        "selected_weights": ", ".join([f"{w:.4f}" for w in qubo_selected_weights]),
-        "objective_score": qubo["objective_score"],
-        "expected_return": qubo["expected_return"],
-        "variance": qubo["variance"],
-        "volatility": qubo["volatility"],
-        "sharpe_ratio": qubo["sharpe_ratio"],
-        "turnover": qubo["turnover"],
-        "transaction_cost": qubo["transaction_cost"],
-        "budget": BUDGET,
-        "selected_count": qubo["selected_count"],
-        "constraint_budget_ok": qubo["constraint_budget_ok"],
-        "constraint_long_only_ok": qubo["constraint_long_only_ok"],
-        "constraint_fully_invested_ok": qubo["constraint_fully_invested_ok"],
-        "constraint_sector_ok": qubo["constraint_sector_ok"],
-        "sector_exposures": str(qubo["sector_exposures"]),
-    }
-
-    # === Equal-Weight Benchmark ===
-    n_assets = len(prices.columns)
-    ew_weights = np.ones(n_assets) / n_assets
-
-    ew_metrics = portfolio_metrics(
-        ew_weights,
-        mean_returns,
-        cov_matrix,
-        risk_free_rate=RISK_FREE_RATE,
+    regime_qubo = run_qubo_portfolio(
+        mean_returns=mean_returns,
+        cov_matrix=cov_matrix,
+        previous_weights=previous_weights,
+        budget=BUDGET,
+        tickers=tickers,
+        sector_map=SECTOR_MAP,
+        sector_max_weights=SECTOR_MAX_WEIGHTS,
+        lambda_risk=rp["lambda_risk"],
+        P_card=rp["P_card"],
+        P_turn=rp["P_turn"],
+        P_turn_quad=rp["P_turn_quad"],
+        P_sector=rp["P_sector"],
+        transaction_cost_penalty=TRANSACTION_COST_PENALTY,
+        num_reads=250,
+        num_sweeps=2500,
+        seed=42,
     )
-    ew_turnover = compute_turnover(ew_weights, previous_weights_array)
-    ew_transaction_cost = TRANSACTION_COST_PENALTY * ew_turnover
 
-    ew_row = {
-        "model": "equal_weight_benchmark",
-        "selected_assets": ", ".join(prices.columns.tolist()),
-        "selected_weights": ", ".join([f"{w:.4f}" for w in ew_weights]),
-        "objective_score": ew_metrics["expected_return"] - RISK_AVERSION * ew_metrics["variance"] - ew_transaction_cost,
-        "expected_return": ew_metrics["expected_return"],
-        "variance": ew_metrics["variance"],
-        "volatility": ew_metrics["volatility"],
-        "sharpe_ratio": ew_metrics["sharpe_ratio"],
-        "turnover": ew_turnover,
-        "transaction_cost": ew_transaction_cost,
-        "budget": n_assets,
-        "selected_count": n_assets,
-        "constraint_budget_ok": True,
-        "constraint_long_only_ok": True,
-        "constraint_fully_invested_ok": True,
-        "constraint_sector_ok": False,
-        "sector_exposures": "benchmark_not_sector_constrained",
-    }
+    blended_weights = partial_rebalance(
+        previous_weights,
+        np.array(regime_qubo["weights"], dtype=float),
+        latest_regime,
+    )
+    blended_selection = selection_from_weights(blended_weights, BUDGET)
 
-    # === Save Results ===
-    # Classical baseline only (for backward compatibility)
-    pd.DataFrame([baseline_row]).to_csv(RESULTS_FILE, index=False)
+    blended_expected_return = float(np.dot(mean_returns, blended_weights))
+    blended_variance = float(blended_weights @ cov_matrix @ blended_weights)
+    blended_volatility = float(np.sqrt(max(blended_variance, 0.0)))
+    blended_turnover = float(np.sum(np.abs(blended_weights - previous_weights)))
+    blended_transaction_cost = float(TRANSACTION_COST_PENALTY * blended_turnover)
+    blended_objective_score = (
+        blended_expected_return
+        - rp["lambda_risk"] * blended_variance
+        - blended_transaction_cost
+    )
+    blended_constraints = check_constraints(
+        blended_selection,
+        blended_weights,
+        budget=BUDGET,
+        tickers=tickers,
+        sector_map=SECTOR_MAP,
+        sector_max_weights=SECTOR_MAX_WEIGHTS,
+    )
 
-    # Comparison: classical + QUBO + benchmark
-    comparison_df = pd.DataFrame([baseline_row, qubo_row, ew_row])
-    comparison_df.to_csv(COMPARISON_RESULTS_FILE, index=False)
+    equal_weight = equal_weight_benchmark(mean_returns, cov_matrix, previous_weights, tickers)
 
-    # Summary: classical vs benchmark
-    summary_row_classical = {
-        "optimized_model": "optimized_baseline",
-        "benchmark_model": "equal_weight_benchmark",
-        "delta_expected_return": baseline_row["expected_return"] - ew_row["expected_return"],
-        "delta_variance": baseline_row["variance"] - ew_row["variance"],
-        "delta_volatility": baseline_row["volatility"] - ew_row["volatility"],
-        "delta_sharpe_ratio": baseline_row["sharpe_ratio"] - ew_row["sharpe_ratio"],
-        "delta_objective_score": baseline_row["objective_score"] - ew_row["objective_score"],
-        "delta_turnover": baseline_row["turnover"] - ew_row["turnover"],
-        "delta_transaction_cost": baseline_row["transaction_cost"] - ew_row["transaction_cost"],
-        "optimized_beats_benchmark_on_objective": baseline_row["objective_score"] > ew_row["objective_score"],
-        "optimized_beats_benchmark_on_sharpe": baseline_row["sharpe_ratio"] > ew_row["sharpe_ratio"],
-    }
+    classical_result = normalize_result(
+        "Classical Baseline",
+        classical["selection"],
+        classical["weights"],
+        classical["objective_score"],
+        classical["turnover"],
+        classical["transaction_cost"],
+        classical["expected_return"],
+        classical["variance"],
+        classical["volatility"],
+        classical["sharpe_ratio"],
+        {
+            "constraint_budget_ok": classical["constraint_budget_ok"],
+            "constraint_long_only_ok": classical["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": classical["constraint_fully_invested_ok"],
+            "constraint_sector_ok": classical["constraint_sector_ok"],
+            "sector_exposures": classical["sector_exposures"],
+        },
+    )
 
-    # Summary: QUBO vs benchmark
-    summary_row_qubo = {
-        "optimized_model": "qubo_optimizer",
-        "benchmark_model": "equal_weight_benchmark",
-        "delta_expected_return": qubo_row["expected_return"] - ew_row["expected_return"],
-        "delta_variance": qubo_row["variance"] - ew_row["variance"],
-        "delta_volatility": qubo_row["volatility"] - ew_row["volatility"],
-        "delta_sharpe_ratio": qubo_row["sharpe_ratio"] - ew_row["sharpe_ratio"],
-        "delta_objective_score": qubo_row["objective_score"] - ew_row["objective_score"],
-        "delta_turnover": qubo_row["turnover"] - ew_row["turnover"],
-        "delta_transaction_cost": qubo_row["transaction_cost"] - ew_row["transaction_cost"],
-        "optimized_beats_benchmark_on_objective": qubo_row["objective_score"] > ew_row["objective_score"],
-        "optimized_beats_benchmark_on_sharpe": qubo_row["sharpe_ratio"] > ew_row["sharpe_ratio"],
-    }
+    static_result = normalize_result(
+        "Static QUBO+",
+        static_qubo["selection"],
+        static_qubo["weights"],
+        static_qubo["objective_score"],
+        static_qubo["turnover"],
+        static_qubo["transaction_cost"],
+        static_qubo["expected_return"],
+        static_qubo["variance"],
+        static_qubo["volatility"],
+        static_qubo["sharpe_ratio"],
+        {
+            "constraint_budget_ok": static_qubo["constraint_budget_ok"],
+            "constraint_long_only_ok": static_qubo["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": static_qubo["constraint_fully_invested_ok"],
+            "constraint_sector_ok": static_qubo["constraint_sector_ok"],
+            "sector_exposures": static_qubo["sector_exposures"],
+        },
+    )
 
-    # Summary: QUBO vs classical
-    summary_row_qubo_vs_classical = {
-        "qubo_model": "qubo_optimizer",
-        "classical_model": "optimized_baseline",
-        "delta_expected_return": qubo_row["expected_return"] - baseline_row["expected_return"],
-        "delta_variance": qubo_row["variance"] - baseline_row["variance"],
-        "delta_volatility": qubo_row["volatility"] - baseline_row["volatility"],
-        "delta_sharpe_ratio": qubo_row["sharpe_ratio"] - baseline_row["sharpe_ratio"],
-        "delta_objective_score": qubo_row["objective_score"] - baseline_row["objective_score"],
-        "delta_turnover": qubo_row["turnover"] - baseline_row["turnover"],
-        "delta_transaction_cost": qubo_row["transaction_cost"] - baseline_row["transaction_cost"],
-        "qubo_beats_classical_on_objective": qubo_row["objective_score"] > baseline_row["objective_score"],
-        "qubo_beats_classical_on_sharpe": qubo_row["sharpe_ratio"] > baseline_row["sharpe_ratio"],
-    }
+    regime_result = normalize_result(
+        f"Regime-Aware QUBO+ ({latest_regime})",
+        blended_selection,
+        blended_weights,
+        blended_objective_score,
+        blended_turnover,
+        blended_transaction_cost,
+        blended_expected_return,
+        blended_variance,
+        blended_volatility,
+        blended_expected_return / max(blended_volatility, 1e-12),
+        {
+            "constraint_budget_ok": blended_constraints["constraint_budget_ok"],
+            "constraint_long_only_ok": blended_constraints["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": blended_constraints["constraint_fully_invested_ok"],
+            "constraint_sector_ok": blended_constraints["constraint_sector_ok"],
+            "sector_exposures": blended_constraints["sector_exposures"],
+        },
+    )
 
-    pd.DataFrame([summary_row_classical, summary_row_qubo, summary_row_qubo_vs_classical]).to_csv(SUMMARY_RESULTS_FILE, index=False)
-    build_comparison_chart(comparison_df, CHART_FILE)
+    benchmark_result = normalize_result(
+        "Equal-Weight Benchmark",
+        equal_weight["selection"],
+        equal_weight["weights"],
+        equal_weight["objective_score"],
+        equal_weight["turnover"],
+        equal_weight["transaction_cost"],
+        equal_weight["expected_return"],
+        equal_weight["variance"],
+        equal_weight["volatility"],
+        equal_weight["sharpe_ratio"],
+        {
+            "constraint_budget_ok": equal_weight["constraint_budget_ok"],
+            "constraint_long_only_ok": equal_weight["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": equal_weight["constraint_fully_invested_ok"],
+            "constraint_sector_ok": equal_weight["constraint_sector_ok"],
+            "sector_exposures": equal_weight["sector_exposures"],
+        },
+    )
 
-    # === Print Results ===
-    print("\n=== Optimized Baseline (Classical) ===")
-    print("Selected assets:", selected_assets)
-    print("Selected weights:", selected_weights)
-    print("Objective score:", optimized["objective_score"])
-    print("Expected return:", optimized["expected_return"])
-    print("Variance:", optimized["variance"])
-    print("Volatility:", optimized["volatility"])
-    print("Sharpe ratio:", optimized["sharpe_ratio"])
-    print("Turnover:", optimized["turnover"])
-    print("Transaction cost:", optimized["transaction_cost"])
-    print("Constraint checks:")
-    print("  budget:", optimized["constraint_budget_ok"])
-    print("  long_only:", optimized["constraint_long_only_ok"])
-    print("  fully_invested:", optimized["constraint_fully_invested_ok"])
-    print("  sector:", optimized["constraint_sector_ok"])
-    print("Sector exposures:", optimized["sector_exposures"])
+    print(f"\nDetected latest market regime: {latest_regime}")
+    print_report("Optimized Baseline (Classical)", classical_result, tickers)
+    print_report("Static QUBO+", static_result, tickers)
+    print_report("Regime-Aware QUBO+ (blended)", regime_result, tickers)
+    print_report("Equal-Weight Benchmark", benchmark_result, tickers)
 
-    print("\n=== QUBO Optimizer ===")
-    print("Selected assets:", qubo_selected_assets)
-    print("Selected weights:", qubo_selected_weights)
-    print("Objective score:", qubo["objective_score"])
-    print("Expected return:", qubo["expected_return"])
-    print("Variance:", qubo["variance"])
-    print("Volatility:", qubo["volatility"])
-    print("Sharpe ratio:", qubo["sharpe_ratio"])
-    print("Turnover:", qubo["turnover"])
-    print("Transaction cost:", qubo["transaction_cost"])
-    print("Constraint checks:")
-    print("  budget:", qubo["constraint_budget_ok"])
-    print("  long_only:", qubo["constraint_long_only_ok"])
-    print("  fully_invested:", qubo["constraint_fully_invested_ok"])
-    print("  sector:", qubo["constraint_sector_ok"])
-    print("Sector exposures:", qubo["sector_exposures"])
+    comparison = pd.DataFrame([
+        {
+            "model": classical_result["name"],
+            "objective_score": classical_result["objective_score"],
+            "expected_return": classical_result["expected_return"],
+            "variance": classical_result["variance"],
+            "volatility": classical_result["volatility"],
+            "sharpe_ratio": classical_result["sharpe_ratio"],
+            "turnover": classical_result["turnover"],
+            "transaction_cost": classical_result["transaction_cost"],
+            "constraint_budget_ok": classical_result["constraint_budget_ok"],
+            "constraint_long_only_ok": classical_result["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": classical_result["constraint_fully_invested_ok"],
+            "constraint_sector_ok": classical_result["constraint_sector_ok"],
+        },
+        {
+            "model": static_result["name"],
+            "objective_score": static_result["objective_score"],
+            "expected_return": static_result["expected_return"],
+            "variance": static_result["variance"],
+            "volatility": static_result["volatility"],
+            "sharpe_ratio": static_result["sharpe_ratio"],
+            "turnover": static_result["turnover"],
+            "transaction_cost": static_result["transaction_cost"],
+            "constraint_budget_ok": static_result["constraint_budget_ok"],
+            "constraint_long_only_ok": static_result["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": static_result["constraint_fully_invested_ok"],
+            "constraint_sector_ok": static_result["constraint_sector_ok"],
+        },
+        {
+            "model": regime_result["name"],
+            "objective_score": regime_result["objective_score"],
+            "expected_return": regime_result["expected_return"],
+            "variance": regime_result["variance"],
+            "volatility": regime_result["volatility"],
+            "sharpe_ratio": regime_result["sharpe_ratio"],
+            "turnover": regime_result["turnover"],
+            "transaction_cost": regime_result["transaction_cost"],
+            "constraint_budget_ok": regime_result["constraint_budget_ok"],
+            "constraint_long_only_ok": regime_result["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": regime_result["constraint_fully_invested_ok"],
+            "constraint_sector_ok": regime_result["constraint_sector_ok"],
+        },
+        {
+            "model": benchmark_result["name"],
+            "objective_score": benchmark_result["objective_score"],
+            "expected_return": benchmark_result["expected_return"],
+            "variance": benchmark_result["variance"],
+            "volatility": benchmark_result["volatility"],
+            "sharpe_ratio": benchmark_result["sharpe_ratio"],
+            "turnover": benchmark_result["turnover"],
+            "transaction_cost": benchmark_result["transaction_cost"],
+            "constraint_budget_ok": benchmark_result["constraint_budget_ok"],
+            "constraint_long_only_ok": benchmark_result["constraint_long_only_ok"],
+            "constraint_fully_invested_ok": benchmark_result["constraint_fully_invested_ok"],
+            "constraint_sector_ok": benchmark_result["constraint_sector_ok"],
+        },
+    ])
 
-    print("\n=== Equal-Weight Benchmark ===")
-    print("Assets:", prices.columns.tolist())
-    print("Weights:", ew_weights.tolist())
-    print("Objective score:", ew_row["objective_score"])
-    print("Expected return:", ew_row["expected_return"])
-    print("Variance:", ew_row["variance"])
-    print("Volatility:", ew_row["volatility"])
-    print("Sharpe ratio:", ew_row["sharpe_ratio"])
-    print("Turnover:", ew_row["turnover"])
-    print("Transaction cost:", ew_row["transaction_cost"])
+    summary = pd.DataFrame([
+        {"metric": "Static QUBO+ vs Classical objective delta", "value": static_result["objective_score"] - classical_result["objective_score"]},
+        {"metric": "Static QUBO+ vs Classical Sharpe delta", "value": static_result["sharpe_ratio"] - classical_result["sharpe_ratio"]},
+        {"metric": "Regime-Aware QUBO+ vs Classical objective delta", "value": regime_result["objective_score"] - classical_result["objective_score"]},
+        {"metric": "Regime-Aware QUBO+ vs Classical Sharpe delta", "value": regime_result["sharpe_ratio"] - classical_result["sharpe_ratio"]},
+        {"metric": "Regime-Aware QUBO+ vs Static QUBO+ objective delta", "value": regime_result["objective_score"] - static_result["objective_score"]},
+        {"metric": "Regime-Aware QUBO+ vs Static QUBO+ Sharpe delta", "value": regime_result["sharpe_ratio"] - static_result["sharpe_ratio"]},
+        {"metric": "Static QUBO+ vs Benchmark Sharpe delta", "value": static_result["sharpe_ratio"] - benchmark_result["sharpe_ratio"]},
+        {"metric": "Regime-Aware QUBO+ vs Benchmark Sharpe delta", "value": regime_result["sharpe_ratio"] - benchmark_result["sharpe_ratio"]},
+    ])
+
+    save_outputs(comparison, summary)
 
     print("\n=== Comparison Summary ===")
     print("\n-- Classical vs Benchmark --")
-    print("Delta expected return:", summary_row_classical["delta_expected_return"])
-    print("Delta variance:", summary_row_classical["delta_variance"])
-    print("Delta volatility:", summary_row_classical["delta_volatility"])
-    print("Delta Sharpe ratio:", summary_row_classical["delta_sharpe_ratio"])
-    print("Delta objective score:", summary_row_classical["delta_objective_score"])
-    print("Classical beats benchmark on objective:", summary_row_classical["optimized_beats_benchmark_on_objective"])
-    print("Classical beats benchmark on Sharpe:", summary_row_classical["optimized_beats_benchmark_on_sharpe"])
+    print(f"Delta objective score: {classical_result['objective_score'] - benchmark_result['objective_score']}")
+    print(f"Delta Sharpe ratio: {classical_result['sharpe_ratio'] - benchmark_result['sharpe_ratio']}")
 
-    print("\n-- QUBO vs Benchmark --")
-    print("Delta expected return:", summary_row_qubo["delta_expected_return"])
-    print("Delta variance:", summary_row_qubo["delta_variance"])
-    print("Delta volatility:", summary_row_qubo["delta_volatility"])
-    print("Delta Sharpe ratio:", summary_row_qubo["delta_sharpe_ratio"])
-    print("Delta objective score:", summary_row_qubo["delta_objective_score"])
-    print("QUBO beats benchmark on objective:", summary_row_qubo["optimized_beats_benchmark_on_objective"])
-    print("QUBO beats benchmark on Sharpe:", summary_row_qubo["optimized_beats_benchmark_on_sharpe"])
+    print("\n-- Static QUBO+ vs Benchmark --")
+    print(f"Delta objective score: {static_result['objective_score'] - benchmark_result['objective_score']}")
+    print(f"Delta Sharpe ratio: {static_result['sharpe_ratio'] - benchmark_result['sharpe_ratio']}")
 
-    print("\n-- QUBO vs Classical --")
-    print("Delta expected return:", summary_row_qubo_vs_classical["delta_expected_return"])
-    print("Delta variance:", summary_row_qubo_vs_classical["delta_variance"])
-    print("Delta volatility:", summary_row_qubo_vs_classical["delta_volatility"])
-    print("Delta Sharpe ratio:", summary_row_qubo_vs_classical["delta_sharpe_ratio"])
-    print("Delta objective score:", summary_row_qubo_vs_classical["delta_objective_score"])
-    print("QUBO beats classical on objective:", summary_row_qubo_vs_classical["qubo_beats_classical_on_objective"])
-    print("QUBO beats classical on Sharpe:", summary_row_qubo_vs_classical["qubo_beats_classical_on_sharpe"])
+    print("\n-- Regime-Aware QUBO+ vs Benchmark --")
+    print(f"Delta objective score: {regime_result['objective_score'] - benchmark_result['objective_score']}")
+    print(f"Delta Sharpe ratio: {regime_result['sharpe_ratio'] - benchmark_result['sharpe_ratio']}")
+
+    print("\n-- Regime-Aware QUBO+ vs Static QUBO+ --")
+    print(f"Delta objective score: {regime_result['objective_score'] - static_result['objective_score']}")
+    print(f"Delta Sharpe ratio: {regime_result['sharpe_ratio'] - static_result['sharpe_ratio']}")
 
     print(f"\nPrices saved to {PRICES_FILE}")
     print(f"Baseline results saved to {RESULTS_FILE}")
     print(f"Comparison results saved to {COMPARISON_RESULTS_FILE}")
     print(f"Summary results saved to {SUMMARY_RESULTS_FILE}")
     print(f"Comparison chart saved to {CHART_FILE}")
+
+
+def main():
+    prices = download_adjusted_close(TICKERS, START_DATE, END_DATE)
+    save_prices_to_csv(prices, PRICES_FILE)
+    run_static_and_regime_aware(prices, TICKERS)
 
 
 if __name__ == "__main__":

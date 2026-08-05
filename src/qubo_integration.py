@@ -18,25 +18,33 @@ def run_qubo_portfolio(
     lambda_risk: float = 1.0,
     P_card: float = 10.0,
     P_turn: float = 1.0,
+    P_turn_quad: float = 2.0,
+    P_sector: float = 20.0,
     transaction_cost_penalty: float = 0.02,
     risk_free_rate: float = 0.0,
-    num_reads: int = 100,
-    num_sweeps: int = 1000,
+    num_reads: int = 250,
+    num_sweeps: int = 2500,
     seed: int = 42,
 ) -> Dict[str, Any]:
     n_assets = len(mean_returns)
 
     qubo_result = _run_qubo_optimizer(
-        mu=mean_returns,
-        Sigma=cov_matrix,
-        w_old=previous_weights,
+        mu=np.asarray(mean_returns, dtype=float),
+        Sigma=np.asarray(cov_matrix, dtype=float),
+        w_old=np.asarray(previous_weights, dtype=float),
         K=budget,
+        tickers=tickers,
+        sector_map=sector_map,
+        sector_max_weights=sector_max_weights,
         lambda_risk=lambda_risk,
         P_card=P_card,
         P_turn=P_turn,
+        P_turn_quad=P_turn_quad,
+        P_sector=P_sector,
         num_reads=num_reads,
         num_sweeps=num_sweeps,
         c_trans=transaction_cost_penalty,
+        risk_free_rate=risk_free_rate,
         seed=seed,
     )
 
@@ -76,6 +84,7 @@ def run_qubo_portfolio(
         "constraint_budget_ok": int(selection.sum()) == budget,
         "constraint_long_only_ok": bool(np.all(weights_array >= -1e-8)),
         "constraint_fully_invested_ok": bool(abs(weights_array.sum() - 1.0) <= 1e-8),
-        "constraint_sector_ok": sector_ok,
+        "constraint_sector_ok": bool(sector_ok),
         "sector_exposures": sector_exposures,
+        "selected_assets": [tickers[i] for i in selected_indices],
     }
