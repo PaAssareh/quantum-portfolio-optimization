@@ -1,46 +1,64 @@
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from nltk.probability import FreqDist
+import numpy as np
+
 
 class PortfolioCoPilot:
-    def __init__(self, portfolio, allocation):
+    def __init__(self, portfolio, quantum_weights, classical_weights=None, hybrid_weights=None, regime_info=None, metrics=None, benchmarks=None):
         self.portfolio = portfolio
-        self.allocation = allocation
+        self.quantum_weights = np.array(quantum_weights, dtype=float) if quantum_weights is not None else None
+        self.classical_weights = np.array(classical_weights, dtype=float) if classical_weights is not None else None
+        self.hybrid_weights = np.array(hybrid_weights, dtype=float) if hybrid_weights is not None else None
+        self.regime_info = regime_info
+        self.metrics = metrics or {}
+        self.benchmarks = benchmarks or {}
 
-    def explain_allocation(self):
-        explanations = []
-        for asset, weight in zip(self.portfolio.assets, self.allocation):
-            if weight > 0:
-                explanation = f"{asset} was included with a weight of {weight:.2%} because of its high Sharpe ratio and low correlation with other assets."
-                explanations.append(explanation)
-        return "\n".join(explanations)
-
-    def analyze_risk_return(self):
-        portfolio_return = self.portfolio.expected_return(self.allocation)
-        portfolio_volatility = self.portfolio.volatility(self.allocation)
-        portfolio_cvar = self.portfolio.cvar(self.allocation)
-        analysis = f"The optimized portfolio has an expected return of {portfolio_return:.2%} with a volatility of {portfolio_volatility:.2%}. The Conditional Value at Risk (CVaR) is {portfolio_cvar:.2%}, indicating the average loss in the worst 5% of scenarios."
-        return analysis
+    def _fmt(self, value):
+        if isinstance(value, float):
+            return f"{value:.6f}"
+        return str(value)
 
     def generate_report(self):
-        allocation_explanation = self.explain_allocation()
-        risk_return_analysis = self.analyze_risk_return()
+        lines = []
+        lines.append("Portfolio Co-Pilot Report")
+        lines.append("=" * 30)
 
-        # Tokenize and remove stop words from the explanations
-        tokens = word_tokenize(allocation_explanation)
-        filtered_tokens = [word for word in tokens if not word in stopwords.words('english')]
+        if self.regime_info is not None:
+            lines.append(f"Current regime: {self.regime_info}")
 
-        # Calculate word frequencies
-        fdist = FreqDist(filtered_tokens)
-        top_words = fdist.most_common(5)
+        if self.metrics:
+            lines.append("")
+            lines.append("Key metrics:")
+            for key, value in self.metrics.items():
+                lines.append(f"- {key}: {self._fmt(value)}")
 
-        # Generate the report
-        report = "Portfolio Allocation:\n"
-        report += allocation_explanation + "\n\n"
-        report += "Risk-Return Analysis:\n"
-        report += risk_return_analysis + "\n\n"
-        report += "Top Terms Used in Allocation Explanation:\n"
-        for word, frequency in top_words:
-            report += f"{word}: {frequency}\n"
-        
-        return report
+        if self.benchmarks:
+            lines.append("")
+            lines.append("Benchmark comparison:")
+            for key, value in self.benchmarks.items():
+                lines.append(f"- {key}: {self._fmt(value)}")
+
+        if self.quantum_weights is not None:
+            lines.append("")
+            lines.append(f"Quantum weights: {self.quantum_weights}")
+
+        if self.classical_weights is not None:
+            lines.append(f"Classical weights: {self.classical_weights}")
+
+        if self.hybrid_weights is not None:
+            lines.append(f"Hybrid weights: {self.hybrid_weights}")
+
+        lines.append("")
+        lines.append("Interpretation:")
+        if self.metrics.get("hybrid_sharpe", 0) >= self.metrics.get("quantum_sharpe", 0):
+            lines.append("- Hybrid post-processing improved or preserved Sharpe relative to raw quantum output.")
+        else:
+            lines.append("- Hybrid post-processing reduced Sharpe relative to raw quantum output but may have lowered risk.")
+
+        if "hybrid_cvar" in self.metrics and "quantum_cvar" in self.metrics:
+            q_cvar = self.metrics["quantum_cvar"]["CVaR"]
+            h_cvar = self.metrics["hybrid_cvar"]["CVaR"]
+            if h_cvar <= q_cvar:
+                lines.append("- Hybrid allocation reduced tail risk versus raw quantum output.")
+            else:
+                lines.append("- Hybrid allocation increased tail risk versus raw quantum output.")
+
+        return "\n".join(lines)

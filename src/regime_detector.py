@@ -1,46 +1,30 @@
-from typing import Tuple
-import pandas as pd
+from hmmlearn import hmm
 
 
-def detect_regime(
-    prices: pd.DataFrame,
-    window: int = 20,
-    vol_quantile: float = 0.5,
-) -> Tuple[pd.Series, pd.DataFrame]:
-    returns = prices.pct_change().dropna(how="all")
-    rolling_return = returns.rolling(window).mean().mean(axis=1)
-    rolling_vol = returns.rolling(window).std().mean(axis=1)
-    vol_threshold = rolling_vol.quantile(vol_quantile)
+class RegimeDetector:
+    def __init__(self, feature_df, model="hmm", states=3, threshold=0.7):
+        self.feature_df = feature_df
+        self.model = model
+        self.states = states
+        self.threshold = threshold
+        self.regimes = None
 
-    regimes = pd.Series(index=rolling_return.index, dtype="object")
-    regimes[(rolling_return > 0) & (rolling_vol <= vol_threshold)] = "bull"
-    regimes[(rolling_return <= 0) | (rolling_vol > vol_threshold)] = "bear"
-    regimes = regimes.fillna("bear")
+    def detect_regimes(self):
+        if self.model != "hmm":
+            raise NotImplementedError(f"Model {self.model} not implemented in phase 1")
 
-    features = pd.DataFrame(
-        {
-            "rolling_return": rolling_return,
-            "rolling_vol": rolling_vol,
-            "vol_threshold": vol_threshold,
-        }
-    )
-    return regimes, features
+        X = self.feature_df.values.astype(float)
+        model = hmm.GaussianHMM(
+            n_components=self.states,
+            covariance_type="full",
+            n_iter=200,
+            random_state=42
+        )
+        model.fit(X)
+        self.regimes = model.predict(X)
+        return self.regimes
 
-
-def regime_parameters(regime: str) -> dict:
-    regime = str(regime).lower()
-    if regime == "bull":
-        return {
-            "lambda_risk": 0.8,
-            "P_card": 10.0,
-            "P_turn": 1.0,
-            "P_turn_quad": 1.5,
-            "P_sector": 20.0,
-        }
-    return {
-        "lambda_risk": 1.2,
-        "P_card": 12.0,
-        "P_turn": 2.0,
-        "P_turn_quad": 3.0,
-        "P_sector": 25.0,
-    }
+    def get_current_regime(self):
+        if self.regimes is None or len(self.regimes) == 0:
+            return None
+        return int(self.regimes[-1])

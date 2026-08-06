@@ -1,35 +1,44 @@
-from pathlib import Path
-
 import pandas as pd
 import yfinance as yf
 
-from config import PRICES_FILE
+class DataLoader:
+    def __init__(self, tickers, start_date, end_date, source="yahoo"):
+        self.tickers = tickers
+        self.start_date = start_date
+        self.end_date = end_date
+        self.source = source
 
+    def load_market_data(self):
+        if self.source != "yahoo":
+            raise NotImplementedError(f"Data source {self.source} not implemented")
 
-def download_adjusted_close(tickers, start_date, end_date):
-    data = yf.download(
-        tickers=tickers,
-        start=start_date,
-        end=end_date,
-        auto_adjust=True,
-        progress=False,
-        group_by="column",
-    )
+        data = yf.download(
+            self.tickers,
+            start=self.start_date,
+            end=self.end_date,
+            auto_adjust=True,
+            progress=False
+        )
 
-    if data.empty:
-        raise ValueError("No price data downloaded.")
+        if isinstance(data.columns, pd.MultiIndex):
+            if "Close" in data.columns.get_level_values(0):
+                prices = data["Close"]
+            elif "Adj Close" in data.columns.get_level_values(0):
+                prices = data["Adj Close"]
+            else:
+                prices = data.xs("Close", axis=1, level=0, drop_level=True)
+        else:
+            if "Close" in data.columns:
+                prices = data["Close"].to_frame()
+            elif "Adj Close" in data.columns:
+                prices = data["Adj Close"].to_frame()
+            else:
+                prices = data.copy()
 
-    if isinstance(data.columns, pd.MultiIndex):
-        close = data["Close"].copy()
-    else:
-        close = data[["Close"]].copy()
-        close.columns = tickers[:1]
+        prices = prices.dropna(how="all")
+        prices = prices.ffill().dropna()
+        return prices
 
-    close.index.name = "Date"
-    close = close.dropna(how="all")
-    return close
-
-
-def save_prices_to_csv(prices, path=PRICES_FILE):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    prices.to_csv(path)
+    def save_processed_data(self, df, path="data/processed/adj_close.csv"):
+        df.to_csv(path)
+        return path

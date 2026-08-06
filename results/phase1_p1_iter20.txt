@@ -1,0 +1,56 @@
+[11:02:54] Starting portfolio pipeline
+[11:02:54] Loading market data
+[11:02:55] Market data loaded: (1509, 10)
+[11:02:55] Building feature matrix
+[11:02:55] Feature matrix built
+[11:02:55] Initializing portfolio math
+[11:02:55] Running QUBO optimization
+[11:11:04] QUBO optimization complete
+[11:11:04] Computing classical baselines
+[11:11:04] Classical baselines complete
+[11:11:04] Detecting market regimes
+[11:11:07] Regime detection complete
+[11:11:07] Rebalancing portfolio
+[11:11:07] Rebalancing complete
+[11:11:07] Comparing portfolio results
+[11:11:07] Comparison complete
+[11:11:07] Evaluating CVaR metrics
+[11:11:07] CVaR evaluation complete
+[11:11:07] Generating portfolio report
+Portfolio Co-Pilot Report
+==============================
+Current regime: 1
+
+Key metrics:
+- quantum_return: 0.003659
+- quantum_volatility: 0.051350
+- quantum_sharpe: 0.071248
+- classical_return: 0.001095
+- classical_volatility: 0.014641
+- classical_sharpe: 0.074762
+- hybrid_return: 0.001220
+- hybrid_volatility: 0.017117
+- hybrid_sharpe: 0.071248
+- quantum_cvar: {'VaR': np.float64(0.07784301257513099), 'CVaR': 0.11783734454449395}
+- classical_cvar: {'VaR': np.float64(0.02076331786709819), 'CVaR': 0.03484053844532066}
+- hybrid_cvar: {'VaR': np.float64(0.025947670858376994), 'CVaR': 0.039279114848164653}
+- equal_weight_cvar: {'VaR': np.float64(0.017273853608388925), 'CVaR': 0.03070901596807267}
+- minimum_variance_cvar: {'VaR': np.float64(0.014764585576426388), 'CVaR': 0.025238004936609278}
+- current_regime: 1
+
+Benchmark comparison:
+- equal_weight_return: 0.000802
+- equal_weight_sharpe: 0.062649
+- minimum_variance_return: 0.000458
+- minimum_variance_sharpe: 0.042632
+
+Quantum weights: [1. 0. 0. 1. 0. 1. 0. 0. 0. 0.]
+Classical weights: [0.3729139  0.         0.         0.02679519 0.         0.18252052
+ 0.05250902 0.         0.11690614 0.24835523]
+Hybrid weights: [0.33333333 0.         0.         0.33333333 0.         0.33333333
+ 0.         0.         0.         0.        ]
+
+Interpretation:
+- Hybrid post-processing reduced Sharpe relative to raw quantum output but may have lowered risk.
+- Hybrid allocation reduced tail risk versus raw quantum output.
+[11:11:07] Finished in 493.62 seconds
