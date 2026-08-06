@@ -1,5 +1,24 @@
 import warnings
 import time
+import json
+import time
+import warnings
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from scipy.sparse import SparseEfficiencyWarning
+
+from config import Config
+from data_loader import DataLoader
+from feature_engineering import FeatureEngineering
+from portfolio_math import PortfolioMath
+from qubo_optimizer import QUBOOptimizer
+from classical_baseline import ClassicalBaseline
+from regime_detector import RegimeDetector
+from regime_rebalance import RegimeRebalance
+from cvar_analysis import CVaRAnalysis
+from portfolio_copilot import PortfolioCoPilot
 from datetime import datetime
 
 from scipy.sparse import SparseEfficiencyWarning
@@ -110,7 +129,98 @@ def main():
         "minimum_variance_return": benchmark_minvar["quantum_return"],
         "minimum_variance_sharpe": benchmark_minvar["quantum_sharpe"]
     }
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(exist_ok=True)
 
+    figures_dir = outputs_dir / "figures"
+    figures_dir.mkdir(exist_ok=True)
+
+    def make_json_serializable(value):
+        if isinstance(value, dict):
+            return {
+                key: make_json_serializable(item)
+                for key, item in value.items()
+            }
+
+        if isinstance(value, (list, tuple)):
+            return [
+                make_json_serializable(item)
+                for item in value
+            ]
+
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+
+        if isinstance(value, np.generic):
+            return value.item()
+
+        return value
+
+    results_payload = {
+        "configuration": {
+            "qaoa_p": Config.QAOA_P,
+            "qaoa_optimizer": Config.QAOA_OPTIMIZER,
+            "qaoa_maxiter": Config.QAOA_MAXITER,
+            "risk_factor": Config.RISK_FACTOR,
+            "budget": Config.BUDGET,
+            "cvar_alpha": Config.CVaR_ALPHA,
+        },
+        "metrics": make_json_serializable(metrics),
+        "benchmarks": make_json_serializable(benchmarks),
+        "weights": {
+            "quantum": np.asarray(
+                quantum_weights,
+                dtype=float,
+            ).tolist(),
+            "classical": np.asarray(
+                classical_weights,
+                dtype=float,
+            ).tolist(),
+            "hybrid": np.asarray(
+                hybrid_weights,
+                dtype=float,
+            ).tolist(),
+            "equal_weight": np.asarray(
+                equal_weights,
+                dtype=float,
+            ).tolist(),
+            "minimum_variance": np.asarray(
+                minimum_variance_weights,
+                dtype=float,
+            ).tolist(),
+        },
+    }
+
+    with open(
+        outputs_dir / "phase3_metrics.json",
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            results_payload,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    np.savetxt(
+        outputs_dir / "phase3_weights.csv",
+        np.column_stack(
+            [
+                quantum_weights,
+                classical_weights,
+                hybrid_weights,
+                equal_weights,
+                minimum_variance_weights,
+            ]
+        ),
+        delimiter=",",
+        header=(
+            "quantum,classical,hybrid,"
+            "equal_weight,minimum_variance"
+        ),
+        comments="",
+    )
     log_step("Generating portfolio report")
     copilot = PortfolioCoPilot(
         portfolio,

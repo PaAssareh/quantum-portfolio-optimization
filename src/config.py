@@ -8,9 +8,9 @@ class Config:
     BUDGET = 3
     PENALTY = 10.0
 
-    QAOA_P = 1
+    QAOA_P = 2
     QAOA_OPTIMIZER = "COBYLA"
-    QAOA_MAXITER = 20
+    QAOA_MAXITER = 50
 
     REGIME_MODEL = "hmm"
     REGIME_STATES = 3
